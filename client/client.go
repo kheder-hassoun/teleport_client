@@ -14,63 +14,55 @@ import (
 	"github.com/progrium/qmux/golang/session"
 )
 
-var maxConnections int
-
 func main() {
 	var port = flag.String("p", "9999", "server port to use")
 	var host = flag.String("h", "teleport.me", "server hostname to use")
-	var subscription = flag.String("s", "free", "subscription level: free, moderate, high")
+	var username = flag.String("u", "test1", "username for authentication")
+	var password = flag.String("pwd", "123456", "password for authentication")
+	var sharedPort = flag.String("sp", "8000", "shared port to use")
+	maxConnections := 100
 	flag.Parse()
 
-	switch *subscription {
-	case "free":
-		maxConnections = 1
-	case "moderate":
-		maxConnections = 50
-	case "high":
-		maxConnections = 100
-	default:
-		log.Fatal("Unknown subscription level")
+	if *username == "" || *password == "" {
+		log.Fatal("Username and password must be provided")
 	}
 
-	if flag.Arg(0) != "" {
-		conn, err := net.Dial("tcp", net.JoinHostPort(*host, *port))
+	conn, err := net.Dial("tcp", net.JoinHostPort(*host, *port))
+	fatal(err)
+	client := httputil.NewClientConn(conn, bufio.NewReader(conn))
+	req, err := http.NewRequest("GET", "/", nil)
+	fatal(err)
+
+	// Set the username and password in the header
+	req.Header.Set("X-Username", *username)
+	req.Header.Set("X-Password", *password)
+	req.Host = net.JoinHostPort(*host, *port)
+	log.Println("Sending request with username and password")
+	client.Write(req)
+	resp, _ := client.Read(req)
+	fmt.Printf("port %s http available at:\n", *sharedPort)
+	fmt.Printf("http://%s\n", resp.Header.Get("X-Public-Host"))
+	c, _ := client.Hijack()
+	sess := session.New(c)
+	defer sess.Close()
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConnections) // semaphore to limit connections
+
+	for {
+		ch, err := sess.Accept()
 		fatal(err)
-		client := httputil.NewClientConn(conn, bufio.NewReader(conn))
-		req, err := http.NewRequest("GET", "/", nil)
+		conn, err := net.Dial("tcp", "127.0.0.1:"+*sharedPort)
 		fatal(err)
-
-		// Set the subscription level in the header
-		req.Header.Set("X-Subscription-Level", *subscription)
-		req.Host = net.JoinHostPort(*host, *port)
-		log.Println("Sending request with subscription level:", *subscription)
-		client.Write(req)
-		resp, _ := client.Read(req)
-		fmt.Printf("port %s http available at:\n", flag.Arg(0))
-		fmt.Printf("http://%s\n", resp.Header.Get("X-Public-Host"))
-		c, _ := client.Hijack()
-		sess := session.New(c)
-		defer sess.Close()
-
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, maxConnections) // semaphore to limit connections
-
-		for {
-			ch, err := sess.Accept()
-			fatal(err)
-			conn, err := net.Dial("tcp", "127.0.0.1:"+flag.Arg(0))
-			fatal(err)
-			sem <- struct{}{} // acquire a slot
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }() // release a slot
-				join(conn, ch)
-			}()
-		}
-		wg.Wait()
-		return
+		sem <- struct{}{} // acquire a slot
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }() // release a slot
+			join(conn, ch)
+		}()
 	}
+	wg.Wait()
 }
 
 func join(a io.ReadWriteCloser, b io.ReadWriteCloser) {
